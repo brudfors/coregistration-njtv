@@ -126,7 +126,7 @@ for iter=1:numel(samp) % loop over sampling factors
     % Initial search values and stopping criterias      
     sc = [];
     for c=1:numel(ixm), sc = [sc sc0]; end
-    iq = diag(sc*20/iter);     
+    iq = diag(sc*20);     
 
     if show_align
         % Alignment before registration
@@ -152,7 +152,7 @@ R = repmat(eye(4),[1 1 C]);
 for c=1:numel(dat.mov), R(:,:,ixm(c)) = GetRigid(q,c,dat); end
 
 % Indices (fixed and moving)
-ix = struct('fix',ixf,'moving',ixm);
+ix = struct('fixed',ixf,'moving',ixm);
 %==========================================================================
 
 %==========================================================================
