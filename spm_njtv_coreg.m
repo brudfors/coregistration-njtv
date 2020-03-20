@@ -299,6 +299,8 @@ R = spm_dexpm(qc,B);
 function y = IdentityJittered(fix)
 dm = [size(fix.z) 1]; 
 y  = Identity(dm);
+rng('default') 
+rng(1);  
 y  = y + rand(size(y),'single');
 %==========================================================================
 
