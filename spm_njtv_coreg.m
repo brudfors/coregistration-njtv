@@ -165,7 +165,7 @@ ix = struct('fixed',ixf,'moving',ixm);
 %==========================================================================
 
 %==========================================================================
-function [cost,njtv] = CostFun(x,dat,show_align)
+function [cost,njtv] = CostFun(q,dat,show_align)
 C     = dat.C;
 Mfix  = dat.fix.mat;
 yfix  = dat.fix.y;
@@ -177,20 +177,24 @@ mtv   = dat.fix.z;
 % Compute for moving
 for c=1:numel(dat.mov) % loop over moving images
     
-    R = GetRigid(x,c,dat);
+    % Get rigid transformation matrix from lie parameteristaion
+    R = GetRigid(q,c,dat);
     
+    % Make alignment vector field (y)
     Mmov = dat.mov(c).mat;
     M    = Mmov\R*Mfix;
     y    = Affine(yfix,M);
     
+    % Move squared gradient magnitude (z)
     z               = spm_diffeo('bsplins',dat.mov(c).z, y, [ones(1,3)  0*ones(1,3)]);
     z(~isfinite(z)) = 0;
     
+    % Add to voxel-wise cost
     mtv  = mtv + z;
     njtv = njtv - sqrt(z)/C;        
 end    
 
-% Get cost
+% Get final cost
 njtv = njtv + sqrt(mtv/C);
 cost = sum(sum(sum(njtv,'double'),'double'),'double');
 
