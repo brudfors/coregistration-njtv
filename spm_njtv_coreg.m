@@ -29,7 +29,7 @@ if isempty(fileparts(which('spm'))), error('SPM12 not on the MATLAB path (get at
 
 % SPM auxiliary-functions
 % git clone https://github.com/WTCN-computational-anatomy-group/auxiliary-functions
-if isempty(fileparts(which('spm_gmm_lib'))), error('auxiliary-functions not on the MATLAB path (get at github.com/WTCN-computational-anatomy-group/auxiliary-functions)'); end
+if isempty(fileparts(which('spm_gmm'))), error('SPM auxiliary-functions not on the MATLAB path (get at github.com/WTCN-computational-anatomy-group/auxiliary-functions)'); end
 
 % Parse options
 %-----------------------
@@ -62,18 +62,20 @@ if ~isa(Nii,'nifti'), Nii = nifti(Nii); end
 
 % Parameters
 is2d = numel(Nii(1).dat.dim) == 2;
-C    = numel(Nii);
+C    = numel(Nii); % Number of channels
 chn  = 1:C;
 ixm  = chn(~ismember(chn,ixf));
-nq   = 6;
+Nm   = numel(ixm); % Number of moving images
+nq   = 6;          % Number of transformation parameters (per image)
 if is2d
+    % Input images are 2D
     nq  = 3;
     tol = tol([1 2 6]); % selects x and y translation, and rotation component    
 end
 sc0  = tol(:)'; % Required accuracy
 
 % Init registration parameters
-q = zeros(1,numel(ixm)*nq);
+q = zeros(1,Nm*nq);
 
 % Get image scaling from RMM/GMM fit
 %-----------------------
@@ -110,7 +112,7 @@ for iter=1:numel(samp) % loop over sampling factors
     samp_i = samp(iter);
         
     % Init dat
-    cl  = cell([1 numel(ixm)]);
+    cl  = cell([1 Nm]);
     dat = struct('fix',struct('z',[],'y',[],'mat',[]), ...
                  'mov',struct('z',cl,'mat',cl), ...
                  'C',C, 'nq',nq);
@@ -123,7 +125,7 @@ for iter=1:numel(samp) % loop over sampling factors
     clear z
     
     % Add moving
-    for c=1:numel(ixm)
+    for c=1:Nm
         [z,mat]        = GetFeatures('SqrdGradMag',Nii(ixm(c)),scl(ixm(c)),samp_i);
         dat.mov(c).z   = z;
         dat.mov(c).mat = mat;
@@ -132,7 +134,7 @@ for iter=1:numel(samp) % loop over sampling factors
     
     % Initial search values and stopping criterias      
     sc = [];
-    for c=1:numel(ixm), sc = [sc sc0]; end
+    for c=1:Nm, sc = [sc sc0]; end
     iq = diag(sc*20);     
 
     if show_align
