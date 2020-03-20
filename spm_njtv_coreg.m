@@ -20,9 +20,16 @@ if nargin > 2
     return;
 end
 
-% Add the SPM auxiliary-functions library
+% Check if required toolboxes are on the MATLAB path
+%-----------------------
+
+% SPM12
+% Download from https://www.fil.ion.ucl.ac.uk/spm/software/download
+if isempty(fileparts(which('spm'))), error('SPM12 not on the MATLAB path (get at fil.ion.ucl.ac.uk/spm/software/download)'); end
+
+% SPM auxiliary-functions
 % git clone https://github.com/WTCN-computational-anatomy-group/auxiliary-functions
-if isempty(fileparts(which('spm_gmm_lib'))), error('auxiliary-functions not on the MATLAB path (get at https://github.com/WTCN-computational-anatomy-group/auxiliary-functions)'); end
+if isempty(fileparts(which('spm_gmm_lib'))), error('auxiliary-functions not on the MATLAB path (get at github.com/WTCN-computational-anatomy-group/auxiliary-functions)'); end
 
 % Parse options
 %-----------------------
