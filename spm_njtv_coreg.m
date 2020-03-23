@@ -1,16 +1,16 @@
-function [q,R,ix] = spm_njtv_coreg(varargin)
+function [q,res] = spm_njtv_coreg(varargin)
 % Groupwise, between modality coregistration using a normalised joint 
 % total variation (NJTV) cost function.
-% FORMAT [q,R,ix] = spm_njtv_coreg(in,opt)
+% FORMAT [q,res] = spm_njtv_coreg(in,opt)
 %
 % INPUT
-% in  - Images as Niis or filenames
+% Nii - Images as Niis or filenames
 % opt - Algorithm options (see below)
 %
 % OUTPUT
 % q   - Lie algebra rigid parameterisation
-% R   - Rigid transformation matrices
-% ix  - struct with indices of fixed and moving images
+% res - struct with ridig transformation matrices, and indices of fixed 
+%       and moving images
 % _______________________________________________________________________
 %  Copyright (C) 2020 Wellcome Trust Centre for Neuroimaging
 
@@ -43,8 +43,8 @@ if ~isfield(opt,'IdxFixed'), opt.IdxFixed = 1; end
 if ~isfield(opt,'ShowFit4Scaling'), opt.ShowFit4Scaling = false; end
 % Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [1]
 if ~isfield(opt,'ShowAlign'), opt.ShowAlign = 1; end
-% Coarse-to-fine sampling scheme in decreasing order [8 4 1]
-if ~isfield(opt,'Samp'), opt.Samp = [8 4 1];  end
+% Coarse-to-fine sampling scheme in decreasing order [8 4 2 1]
+if ~isfield(opt,'Samp'), opt.Samp = [8 4 2 1];  end
 tol        = opt.Tolerance;
 ixf        = opt.IdxFixed;
 show_fit   = opt.ShowFit4Scaling;
@@ -80,28 +80,7 @@ q = zeros(1,Nm*nq);
 % Get image scaling from RMM/GMM fit
 %-----------------------
 
-scl = zeros(1,C);
-nr  = floor(sqrt(C));
-nc  = ceil(C/nr);  
-for c=1:C
-    if show_fit
-        if c == 1, SetFigure('(SPM) Scaling',true); 
-        else,      SetFigure('(SPM) Scaling'); 
-        end 
-        subplot(nr,nc,c); 
-    end        
-
-    isneg = min(Nii(c).dat(:)) < 0;    
-    if isneg
-        % Fit GMM
-        [~,mu_brain,mu_bg] = FitGMM(Nii(c),show_fit);         
-        scl(c)             = 1/abs(mu_brain - mu_bg);
-    else
-        % Fit RMM        
-        [~,mu_brain] = spm_noise_estimate_mod(Nii(c),show_fit);
-        scl(c)       = 1/mu_brain;
-    end       
-end
+scl = GetScaling(Nii,show_fit);
 
 % Start coarse-to-fine
 %-----------------------
@@ -135,7 +114,7 @@ for iter=1:numel(samp) % loop over sampling factors
     % Initial search values and stopping criterias      
     sc = [];
     for c=1:Nm, sc = [sc sc0]; end
-    iq = diag(sc*20);     
+    iq = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
 
     if show_align
         % Alignment before registration
@@ -160,8 +139,8 @@ end
 R = repmat(eye(4),[1 1 C]);
 for c=1:numel(dat.mov), R(:,:,ixm(c)) = GetRigid(q,c,dat); end
 
-% Indices (fixed and moving)
-ix = struct('fixed',ixf,'moving',ixm);
+% Set output
+res = struct('R',R,'ix_fixed',ixf,'ix_moving',ixm);
 %==========================================================================
 
 %==========================================================================
@@ -266,13 +245,20 @@ if dm(3) == 1, y(:,:,:,3) = 1; end
 function g = Grad(im,vx,y)
 d = [size(im) 1 1];
 if nargin < 4, y = Identity(d(1:3)); end
-g                  = zeros([d(1:3) 3],'single');
-[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [2 0 0 1*ones(1,3)]);
-[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 2 0 1*ones(1,3)]);
-[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 2 1*ones(1,3)]);
+g                = zeros([d(1:3) 3],'single');
+% % 'sobel', 'prewitt', 'central', 'intermediate' 
+% [g(:,:,:,1),g(:,:,:,2),g(:,:,:,3)] = imgradientxyz(im,'central');
+% g(:,:,:,1)                         = g(:,:,:,1)/vx(1);
+% g(:,:,:,2)                         = g(:,:,:,2)/vx(2);
+% g(:,:,:,3)                         = g(:,:,:,3)/vx(3);
+bc                 = 1;
+[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [2 0 0 bc*ones(1,3)]);
+[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 2 0 bc*ones(1,3)]);
+[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 2 bc*ones(1,3)]);
 g(:,:,:,1)         = g(:,:,:,1)/vx(1);
 g(:,:,:,2)         = g(:,:,:,2)/vx(2);
 g(:,:,:,3)         = g(:,:,:,3)/vx(3);
+g(~isfinite(g))    = 0;
 %==========================================================================
 
 %==========================================================================
@@ -447,6 +433,33 @@ end
 %==========================================================================
 
 %==========================================================================
+function scl = GetScaling(Nii,show_fit)
+C   = numel(Nii);
+scl = zeros(1,C); % scaling
+nr  = floor(sqrt(C));
+nc  = ceil(C/nr);  
+for c=1:C
+    if show_fit
+        if c == 1, SetFigure('(SPM) Scaling',true); 
+        else,      SetFigure('(SPM) Scaling'); 
+        end 
+        subplot(nr,nc,c); 
+    end        
+
+    isneg = min(Nii(c).dat(:)) < 0;    
+    if isneg
+        % Fit GMM
+        [~,mu_brain,mu_bg] = FitGMM(Nii(c),show_fit);         
+        scl(c)             = 1/(mu_brain - mu_bg);
+    else
+        % Fit RMM        
+        [~,mu_brain] = spm_noise_estimate_mod(Nii(c),show_fit);
+        scl(c)       = 1/mu_brain;
+    end       
+end
+%==========================================================================
+
+%==========================================================================
 function [noise,mu_brain] = spm_noise_estimate_mod(Scans,speak,nr,nc,cnt_subplot)
 % Estimate avarage noise from a series of images
 % FORMAT noise = spm_noise_estimate(Scans)
@@ -576,21 +589,6 @@ if speak
 %     xlabel('Image intensity')
     title('K=2 RMM Fit')
 end
-
-% % Background values p(x | z=bg)
-% [~,ix] = min(sig);
-% p1     = p(:,ix);
-% 
-% % Head values p(x | z=head)
-% [~,ix] = max(sig);
-% p2     = p(:,ix);
-% 
-% % Calculates intensity value for when p(head)=0.5 using
-% % p(head) = p(x | z=head) / ( p(x | z=head) + p(x | z=bg) )
-% pt = p2./(p2 + p1);
-% 
-% [~,ix]   = min(abs(pt - 0.5)); % Find closest value to 0.5
-% val_brain = x(ix);
 %==========================================================================
 
 %==========================================================================
