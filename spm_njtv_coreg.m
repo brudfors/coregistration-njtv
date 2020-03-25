@@ -9,8 +9,8 @@ function [q,res] = spm_njtv_coreg(varargin)
 %
 % OUTPUT
 % q   - Lie algebra rigid parameterisation
-% res - struct with ridig transformation matrices, and indices of fixed 
-%       and moving images
+% res - struct with ridig transformation matrices, indices of fixed 
+%       and moving images, and template orientation matrix
 % _______________________________________________________________________
 %  Copyright (C) 2020 Wellcome Trust Centre for Neuroimaging
 
@@ -34,25 +34,32 @@ if isempty(fileparts(which('spm_gmm'))), error('SPM auxiliary-functions not on t
 % Parse options
 %-----------------------
 
-if nargin == 1, opt = struct; end
+if nargin == 1, opt = struct;
+else,           opt = varargin{2}; end
 % Convergence criteria [tx,ty,tz,rx,ry,rz]
 if ~isfield(opt,'Tolerance'), opt.Tolerance = [0.02 0.02 0.02 0.001 0.001 0.001]; end
-% Picks the fixed image [1]
-if ~isfield(opt,'IdxFixed'), opt.IdxFixed = 1; end
+% Picks the fixed image [1], if zero, uses a template image instead
+if ~isfield(opt,'IxFixed'), opt.IxFixed = 1; end
 % Show GMM/RMM fit to intensity histogram [false]
 if ~isfield(opt,'ShowFit4Scaling'), opt.ShowFit4Scaling = false; end
 % Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [1]
 if ~isfield(opt,'ShowAlign'), opt.ShowAlign = 1; end
-% Coarse-to-fine sampling scheme in decreasing order [8 4 2 1]
-if ~isfield(opt,'Samp'), opt.Samp = [8 4 2 1];  end
+% Coarse-to-fine sampling scheme in decreasing order [1]
+if ~isfield(opt,'Samp'), opt.Samp = [1];  end
+% Voxel size of template (if opt.IxFixed = 0)
+if ~isfield(opt,'VoxTemplate'), opt.VoxTemplate = 1.0; end
 tol        = opt.Tolerance;
-ixf        = opt.IdxFixed;
+ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
 show_align = opt.ShowAlign;
 samp       = opt.Samp;
+vxt        = opt.VoxTemplate;
 
 % If SPM has been compiled with OpenMP, this will speed things up
 setenv('SPM_NUM_THREADS',sprintf('%d',-1));
+
+% Repeatable random numbers
+rng('default'); rng(1);  
 
 % Read image data
 %-----------------------
@@ -67,12 +74,17 @@ chn  = 1:C;
 ixm  = chn(~ismember(chn,ixf));
 Nm   = numel(ixm); % Number of moving images
 nq   = 6;          % Number of transformation parameters (per image)
+matt = eye(4);     % Template orientation matrix
 if is2d
     % Input images are 2D
     nq  = 3;
     tol = tol([1 2 6]); % selects x and y translation, and rotation component    
 end
 sc0  = tol(:)'; % Required accuracy
+
+% Powell options (for mod_spm_powell function)
+opt_pow = struct('mc',struct('do',false,'C',C,'nq',nq,'speak',false));
+if ixf == 0, opt_pow.mc.do = true; end
 
 % Init registration parameters
 q = zeros(1,Nm*nq);
@@ -97,11 +109,19 @@ for iter=1:numel(samp) % loop over sampling factors
                  'C',C, 'nq',nq);
 
     % Add fixed
-    [z,mat]     = GetFeatures('SqrdGradMag',Nii(ixf),scl(ixf),samp_i);
-    dat.fix.z   = z;
-    dat.fix.mat = mat;
-    dat.fix.y   = IdentityJittered(dat.fix);
-    clear z
+    if ixf == 0
+        % Use template
+        [dmt,matt]  = GetTemplateSpace(Nii,vxt,samp_i);    
+        dat.fix.z   = zeros(dmt(1:3),'single');
+        dat.fix.mat = matt;
+    else
+        % Use one of the input images
+        [z,mat]     = GetFeatures('SqrdGradMag',Nii(ixf),scl(ixf),samp_i);
+        dat.fix.z   = z;
+        dat.fix.mat = mat;
+        clear z
+    end
+    dat.fix.y = IdentityJittered(dat.fix);    
     
     % Add moving
     for c=1:Nm
@@ -112,9 +132,9 @@ for iter=1:numel(samp) % loop over sampling factors
     clear z
     
     % Initial search values and stopping criterias      
-    sc = [];
+    sc             = [];
     for c=1:Nm, sc = [sc sc0]; end
-    iq = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
+    iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
 
     if show_align
         % Alignment before registration
@@ -122,9 +142,13 @@ for iter=1:numel(samp) % loop over sampling factors
         ShowAlignment(njtv,cost,false);
     end
     
-    % Start Powell
-    q = spm_powell(q(:),iq,sc,mfilename,dat,show_align);
-
+    % Start Powell (modified version, with mean correction of parameters)
+    if ixf == 0
+        q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align);
+    else        
+        q = spm_powell(q(:),iq,sc,mfilename,dat,show_align);
+    end
+    
     if show_align
         % Alignment after registration
         [cost,njtv] = CostFun(q,dat,show_align);
@@ -136,11 +160,156 @@ end
 %-----------------------
 
 % Transformations
-R = repmat(eye(4),[1 1 C]);
+R                                     = repmat(eye(4),[1 1 C]);
 for c=1:numel(dat.mov), R(:,:,ixm(c)) = GetRigid(q,c,dat); end
 
 % Set output
-res = struct('R',R,'ix_fixed',ixf,'ix_moving',ixm);
+res = struct('R',R,'ix_fixed',ixf,'ix_moving',ixm,'matt',matt);
+%==========================================================================
+
+%==========================================================================
+function [dm,mat] = GetTemplateSpace(Nii,vxt,samp)
+vxt  = vxt(1)*ones([1 3]);
+samp = samp(1)*ones([1 3]);
+
+% Get all dimensions and orientation matrices
+C   = numel(Nii);
+Dm  = zeros([C 3]);
+Mat = zeros([4 4 C]);
+for c=1:C
+    dm         = [Nii(c).dat.dim 1];
+    Dm(c,:)    = dm(1:3);
+    Mat(:,:,c) = Nii(c).mat;
+end
+
+% Compute dimensions and orientation of common space
+[mat,dm] = ComputeAvgMat(Mat,Dm);
+
+% Change voxel size of common space
+vxmu = sqrt(sum(mat(1:3,1:3).^2));
+D    = diag([vxmu./vxt 1]);
+mat  = mat/D;
+dm   = floor(D(1:3,1:3)*dm')';
+
+% Down-sample common space
+samp = max([1 1 1],ceil(samp./vxt));
+D    = diag([1./samp 1]);        
+mat  = mat/D;
+dm   = floor(D(1:3,1:3)*dm(1:3)')';
+%==========================================================================
+
+%==========================================================================
+% ComputeAvgMat()
+function [M_avg,d] = ComputeAvgMat(Mat0,dims)
+% Compute an average voxel-to-world mapping and suitable dimensions
+% FORMAT [M_avg,d] = spm_compute_avg_mat(Mat0,dims)
+% Mat0  - array of matrices (4x4xN)
+% dims  - image dimensions (Nx3)
+% M_avg - voxel-to-world mapping
+% d     - dimensions for average image
+%
+%__________________________________________________________________________
+% Copyright (C) 2012-2019 Wellcome Trust Centre for Neuroimaging
+
+% John Ashburner
+% $Id$
+
+% Rigid-body matrices computed from exp(p(1)*B(:,:,1)+p(2)+B(:,:,2)...)
+%--------------------------------------------------------------------------
+if dims(1,3) == 1, B = AffineBases('SE(2)');
+else,              B = AffineBases('SE(3)');
+end
+
+% Find combination of 90 degree rotations and flips that brings all
+% the matrices closest to axial
+%--------------------------------------------------------------------------
+Matrices = Mat0;
+pmatrix  = [1,2,3; 2,1,3; 3,1,2; 3,2,1; 1,3,2; 2,3,1];
+for i=1:size(Matrices,3)
+    vx    = sqrt(sum(Matrices(1:3,1:3,i).^2));
+    tmp   = Matrices(:,:,i)/diag([vx 1]);
+    R     = tmp(1:3,1:3);
+    minss = Inf;
+    minR  = eye(3);
+    for i1=1:6
+        R1 = zeros(3);
+        R1(pmatrix(i1,1),1)=1;
+        R1(pmatrix(i1,2),2)=1;
+        R1(pmatrix(i1,3),3)=1;
+        for i2=0:7
+            F  = diag([bitand(i2,1)*2-1, bitand(i2,2)-1, bitand(i2,4)/2-1]);
+            R2 = F*R1;
+            ss = sum(sum((R/R2-eye(3)).^2));
+            if ss<minss
+                minss = ss;
+                minR  = R2;
+            end
+        end
+    end
+    rdim = abs(minR*dims(i,:)');
+    R2   = inv(minR);
+    minR = [R2 R2*((sum(R2,1)'-1)/2.*(rdim+1)); 0 0 0 1];
+    Matrices(:,:,i) = Matrices(:,:,i)*minR;
+end
+
+% Average of these matrices
+%--------------------------------------------------------------------------
+M_avg = spm_meanm(Matrices);
+
+% If average involves shears, then find the closest matrix that does not
+% require them
+%--------------------------------------------------------------------------
+p = spm_imatrix(M_avg);
+if sum(p(10:12).^2)>1e-8
+
+    % Zooms computed from exp(p(7)*B2(:,:,1)+p(8)*B2(:,:,2)+p(9)*B2(:,:,3))
+    %----------------------------------------------------------------------
+    B2        = zeros(4,4,3);
+    B2(1,1,1) = 1;
+    B2(2,2,2) = 1;
+    B2(3,3,3) = 1;
+
+    p      = zeros(9,1); % Parameters
+    for it=1:10000
+        [R,dR] = spm_dexpm(p(1:6),B);  % Rotations + Translations
+        [Z,dZ] = spm_dexpm(p(7:9),B2); % Zooms
+
+        M  = R*Z; % Voxel-to-world estimate
+        dM = zeros(4,4,6);
+        for i=1:6, dM(:,:,i)   = dR(:,:,i)*Z; end
+        for i=1:3, dM(:,:,i+6) = R*dZ(:,:,i); end
+        dM = reshape(dM,[16,9]);
+
+        d   = M(:)-M_avg(:); % Difference
+        gr  = dM'*d;         % Gradient
+        Hes = dM'*dM;        % Hessian
+        p   = p - Hes\gr;    % Gauss-Newton update
+        if sum(gr.^2)<1e-8, break; end
+    end
+    M_avg = M;
+end
+
+% Ensure that the FoV covers all images, with a few voxels to spare
+%--------------------------------------------------------------------------
+mn    =  Inf*ones(3,1);
+mx    = -Inf*ones(3,1);
+for i=1:size(Mat0,3)
+    dm      = [dims(i,:) 1 1];
+    corners = [
+        1 dm(1)    1  dm(1)   1  dm(1)    1  dm(1)
+        1    1  dm(2) dm(2)   1     1  dm(2) dm(2)
+        1    1     1     1 dm(3) dm(3) dm(3) dm(3)
+        1    1     1     1    1     1     1     1];
+    M  = M_avg\Mat0(:,:,i);
+    vx = M(1:3,:)*corners;
+    mx = max(mx,max(vx,[],2));
+    mn = min(mn,min(vx,[],2));
+end
+mx    = ceil(mx);
+mn    = floor(mn);
+o     = 3;
+d     = (mx - mn + (2*o + 1))';
+M_avg = M_avg * [eye(3) mn - (o + 1); 0 0 0 1];
 %==========================================================================
 
 %==========================================================================
@@ -156,7 +325,7 @@ mtv   = dat.fix.z;
 % Compute for moving
 for c=1:numel(dat.mov) % loop over moving images
     
-    % Get rigid transformation matrix from lie parameteristaion
+    % Get rigid transformation matrix from lie parameterisation
     R = GetRigid(q,c,dat);
     
     % Make alignment vector field (y)
@@ -165,7 +334,10 @@ for c=1:numel(dat.mov) % loop over moving images
     y    = Affine(yfix,M);
     
     % Move squared gradient magnitude (z)
-    z               = spm_diffeo('bsplins',dat.mov(c).z, y, [ones(1,3)  0*ones(1,3)]);
+    deg = 1;
+    bc  = 1;
+    z   = spm_diffeo('bsplins', dat.mov(c).z, y, ...
+                     [deg*ones(1,3) bc*zeros(1,3)]);
     z(~isfinite(z)) = 0;
     
     % Add to voxel-wise cost
@@ -181,10 +353,19 @@ if show_align > 1, ShowAlignment(njtv,cost); end
 %==========================================================================
 
 %==========================================================================
-function [z,mat] = GetFeatures(typ,Nii,scl,samp)
+function [z,mat] = GetFeatures(typ,Nii,scl,samp,ispet)
+if nargin < 5, ispet = false; end
 
-% Get image data, and possible down-sample
+% Get image data, and possibly down-sample
 [im,mat] = GetImg(Nii,samp);
+
+% fname = Nii.dat.fname;
+% ispet = contains(fname,'pet'); % TODO: hack for RIRE...
+% if ispet
+%     % Rescale intensities between 0 and 1
+%     im  = rescale(im);
+%     scl = 1;
+% end
 
 % Compute feature
 z  = single(im);
@@ -195,11 +376,31 @@ if strcmp(typ,'SqrdGradMag')
     z = sum(z.^2,4);
     
     % Smooth a little bit
-    filt = [0.125 0.75 0.125];    
-    filt = filt./vx;
-    z    = convn(z,reshape(filt,[3,1,1]),'same');
-    z    = convn(z,reshape(filt,[1,3,1]),'same');
-    z    = convn(z,reshape(filt,[1,1,3]),'same'); 
+    z = Smooth(z,vx,0);
+end
+%==========================================================================
+
+%==========================================================================
+function img = Smooth(img,vx,fwhm)
+if nargin < 2, vx   = 1; end
+if nargin < 3, fwhm = 1; end
+
+if numel(fwhm) == 1, fwhm = fwhm*ones(1,3); end
+if numel(vx) == 1,   vx = vx*ones(1,3); end
+
+if fwhm > 0        
+    fwhm = fwhm./vx;            % voxel anisotropy
+    s1   = fwhm/sqrt(8*log(2)); % FWHM -> Gaussian parameter
+
+    x  = round(6*s1(1)); x = -x:x; x = spm_smoothkern(fwhm(1),x,1); x  = x/sum(x);
+    y  = round(6*s1(2)); y = -y:y; y = spm_smoothkern(fwhm(2),y,1); y  = y/sum(y);
+    z  = round(6*s1(3)); z = -z:z; z = spm_smoothkern(fwhm(3),z,1); z  = z/sum(z);
+
+    i  = (length(x) - 1)/2;
+    j  = (length(y) - 1)/2;
+    k  = (length(z) - 1)/2;
+
+    spm_conv_vol(img,img,x,y,z,-[i,j,k]);   
 end
 %==========================================================================
 
@@ -251,10 +452,11 @@ g                = zeros([d(1:3) 3],'single');
 % g(:,:,:,1)                         = g(:,:,:,1)/vx(1);
 % g(:,:,:,2)                         = g(:,:,:,2)/vx(2);
 % g(:,:,:,3)                         = g(:,:,:,3)/vx(3);
+deg                = 2;
 bc                 = 1;
-[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [2 0 0 bc*ones(1,3)]);
-[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 2 0 bc*ones(1,3)]);
-[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 2 bc*ones(1,3)]);
+[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [deg 0 0 bc*ones(1,3)]);
+[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 deg 0 bc*ones(1,3)]);
+[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 deg bc*ones(1,3)]);
 g(:,:,:,1)         = g(:,:,:,1)/vx(1);
 g(:,:,:,2)         = g(:,:,:,2)/vx(2);
 g(:,:,:,3)         = g(:,:,:,3)/vx(3);
@@ -272,7 +474,7 @@ id = zeros([d,3],'single');
 %==========================================================================
 function R = GetRigid(q,c,dat)
 nq = dat.nq;
-B  = RigidBasis;
+B  = AffineBases('SE(3)');
 
 ix = (c - 1)*nq + 1:(c - 1)*nq + nq;        
 qc = q(ix);
@@ -285,21 +487,8 @@ R = spm_dexpm(qc,B);
 function y = IdentityJittered(fix)
 dm = [size(fix.z) 1]; 
 y  = Identity(dm);
-rng('default') 
-rng(1);  
 y  = y + rand(size(y),'single');
 %==========================================================================
-
-%==========================================================================
-function B = RigidBasis
-B                = zeros(4,4,6);
-B(1,4,1)         = 1;
-B(2,4,2)         = 1;
-B(3,4,3)         = 1;
-B([2,3],[2,3],4) = [0 1;-1 0];    
-B([3,1],[3,1],5) = [0 1;-1 0];
-B([1,2],[1,2],6) = [0 1;-1 0];
-%========================================================================== 
 
 %==========================================================================
 function SetFigure(figname,do_clear)
@@ -435,7 +624,7 @@ end
 %==========================================================================
 function scl = GetScaling(Nii,show_fit)
 C   = numel(Nii);
-scl = zeros(1,C); % scaling
+scl = ones(1,C); % scaling
 nr  = floor(sqrt(C));
 nc  = ceil(C/nr);  
 for c=1:C
@@ -629,4 +818,64 @@ tmp     = -(x.^2+nu.^2)./(2*sig2);
 msk     = (tmp > -95) & (x*(nu/sig2) < 85) ; % Identify where Rice probability can be computed
 p(msk)  = (x(msk)./sig2).*exp(tmp(msk)).*besseli(0,x(msk)*(nu/sig2)); % Use Rician distribution
 p(~msk) = (1./sqrt(2*pi*sig2))*exp((-0.5/sig2)*(x(~msk)-nu).^2);      % Use Gaussian distribution
+%==========================================================================
+
+%==========================================================================
+function B = AffineBases(code)
+g     = regexpi(code,'(?<code>\w*)\((?<dim>\d*)\)','names');
+g.dim = str2num(g.dim);
+if numel(g.dim)~=1 || (g.dim ~=0 && g.dim~=2 && g.dim~=3)
+    error('Can not use size');
+end
+if g.dim==0
+    B        = zeros(4,4,0);
+elseif g.dim==2
+    switch g.code
+    case 'T' 
+        B        = zeros(4,4,2);
+        B(1,4,1) =  1;
+        B(2,4,2) =  1;
+    case 'SO'
+        B        = zeros(4,4,1);
+        B(1,2,1) =  1;
+        B(2,1,1) = -1;
+    case 'SE' 
+        B        = zeros(4,4,3);
+        B(1,4,1) =  1;
+        B(2,4,2) =  1;
+        B(1,2,3) =  1;
+        B(2,1,3) = -1;
+    otherwise
+        error('Unknown group.');
+    end
+elseif g.dim==3
+    switch g.code
+    case 'T' 
+        B        = zeros(4,4,3);
+        B(1,4,1) =  1;
+        B(2,4,2) =  1;
+        B(3,4,3) =  1;
+    case 'SO' 
+        B        = zeros(4,4,3);
+        B(1,2,1) =  1;
+        B(2,1,1) = -1;
+        B(1,3,2) =  1;
+        B(3,1,2) = -1;
+        B(2,3,3) =  1;
+        B(3,2,3) = -1;
+    case 'SE' 
+        B        = zeros(4,4,6);
+        B(1,4,1) =  1;
+        B(2,4,2) =  1;
+        B(3,4,3) =  1;
+        B(1,2,4) =  1;
+        B(2,1,4) = -1;
+        B(1,3,5) =  1;
+        B(3,1,5) = -1;
+        B(2,3,6) =  1;
+        B(3,2,6) = -1;
+    otherwise
+        error('Unknown group.');
+    end
+end
 %==========================================================================
