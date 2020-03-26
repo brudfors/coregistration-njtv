@@ -1,16 +1,20 @@
-function [q,res] = spm_njtv_coreg(varargin)
+function [q,R] = spm_njtv_coreg(varargin)
 % Groupwise, between modality coregistration using a normalised joint 
 % total variation (NJTV) cost function.
-% FORMAT [q,res] = spm_njtv_coreg(in,opt)
+% FORMAT [q,R] = spm_njtv_coreg(in,opt)
 %
 % INPUT
-% Nii - Images as Niis or filenames
+% Nii - C images, as Niis or filenames
 % opt - Algorithm options (see below)
 %
 % OUTPUT
-% q   - Lie algebra rigid parameterisation
-% res - struct with ridig transformation matrices, indices of fixed 
-%       and moving images, and template orientation matrix
+% q   - Lie algebra rigid parameterisation (needed for spm_powell)
+% R   - C rigid transformation matrices
+%
+%       A mapping from image 1 to image 2 is given by:
+%
+%                   R(:,:,2)\R(:,:,1)*M1
+%
 % _______________________________________________________________________
 %  Copyright (C) 2020 Wellcome Trust Centre for Neuroimaging
 
@@ -37,23 +41,27 @@ if isempty(fileparts(which('spm_gmm'))), error('SPM auxiliary-functions not on t
 if nargin == 1, opt = struct;
 else,           opt = varargin{2}; end
 % Convergence criteria [tx,ty,tz,rx,ry,rz]
-if ~isfield(opt,'Tolerance'), opt.Tolerance = [0.02 0.02 0.02 0.001 0.001 0.001]; end
+if ~isfield(opt,'Tolerance'),       opt.Tolerance = [0.02 0.02 0.02 0.001 0.001 0.001]; end
 % Picks the fixed image [1], if zero, uses a template image instead
-if ~isfield(opt,'IxFixed'), opt.IxFixed = 1; end
+if ~isfield(opt,'IxFixed'),         opt.IxFixed = 1; end
 % Show GMM/RMM fit to intensity histogram [false]
 if ~isfield(opt,'ShowFit4Scaling'), opt.ShowFit4Scaling = false; end
 % Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [1]
-if ~isfield(opt,'ShowAlign'), opt.ShowAlign = 1; end
-% Coarse-to-fine sampling scheme in decreasing order [1]
-if ~isfield(opt,'Samp'), opt.Samp = [1];  end
+if ~isfield(opt,'ShowAlign'),       opt.ShowAlign = 1; end
+% Coarse-to-fine sampling scheme in decreasing order [8 4 2 1]
+if ~isfield(opt,'Samp'),            opt.Samp = [8 4 2 1];  end
 % Voxel size of template (if opt.IxFixed = 0)
-if ~isfield(opt,'VoxTemplate'), opt.VoxTemplate = 1.0; end
+if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
+% Modify header orientation matrices of moving images
+if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
 show_align = opt.ShowAlign;
 samp       = opt.Samp;
 vxt        = opt.VoxTemplate;
+if isempty(ixf), ixf = 0; end
+mod_head   = opt.ModifyHeader;
 
 % If SPM has been compiled with OpenMP, this will speed things up
 setenv('SPM_NUM_THREADS',sprintf('%d',-1));
@@ -74,7 +82,6 @@ chn  = 1:C;
 ixm  = chn(~ismember(chn,ixf));
 Nm   = numel(ixm); % Number of moving images
 nq   = 6;          % Number of transformation parameters (per image)
-matt = eye(4);     % Template orientation matrix
 if is2d
     % Input images are 2D
     nq  = 3;
@@ -116,7 +123,7 @@ for iter=1:numel(samp) % loop over sampling factors
         dat.fix.mat = matt;
     else
         % Use one of the input images
-        [z,mat]     = GetFeatures('SqrdGradMag',Nii(ixf),scl(ixf),samp_i);
+        [z,mat]     = SqrdGradMag(Nii(ixf),scl(ixf),samp_i);
         dat.fix.z   = z;
         dat.fix.mat = mat;
         clear z
@@ -125,7 +132,7 @@ for iter=1:numel(samp) % loop over sampling factors
     
     % Add moving
     for c=1:Nm
-        [z,mat]        = GetFeatures('SqrdGradMag',Nii(ixm(c)),scl(ixm(c)),samp_i);
+        [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i);
         dat.mov(c).z   = z;
         dat.mov(c).mat = mat;
     end
@@ -156,15 +163,18 @@ for iter=1:numel(samp) % loop over sampling factors
     end
 end
 
-% Get outputs
-%-----------------------
-
 % Transformations
 R                                     = repmat(eye(4),[1 1 C]);
-for c=1:numel(dat.mov), R(:,:,ixm(c)) = GetRigid(q,c,dat); end
+for c=1:numel(dat.mov), R(:,:,ixm(c)) = inv(GetRigid(q,c,dat)); end
 
-% Set output
-res = struct('R',R,'ix_fixed',ixf,'ix_moving',ixm,'matt',matt);
+if mod_head
+    % Modify headers
+    for c=1:C
+        fname = Nii(c).dat.fname;
+        M     = Nii(c).mat; 
+        spm_get_space(fname,R(:,:,c)*M); 
+    end
+end
 %==========================================================================
 
 %==========================================================================
@@ -334,8 +344,8 @@ for c=1:numel(dat.mov) % loop over moving images
     y    = Affine(yfix,M);
     
     % Move squared gradient magnitude (z)
-    deg = 1;
-    bc  = 1;
+    deg = 2;
+    bc  = 0;
     z   = spm_diffeo('bsplins', dat.mov(c).z, y, ...
                      [deg*ones(1,3) bc*zeros(1,3)]);
     z(~isfinite(z)) = 0;
@@ -353,31 +363,27 @@ if show_align > 1, ShowAlignment(njtv,cost); end
 %==========================================================================
 
 %==========================================================================
-function [z,mat] = GetFeatures(typ,Nii,scl,samp,ispet)
-if nargin < 5, ispet = false; end
+function [z,mat] = SqrdGradMag(Nii,scl,samp)
 
 % Get image data, and possibly down-sample
 [im,mat] = GetImg(Nii,samp);
 
-% fname = Nii.dat.fname;
-% ispet = contains(fname,'pet'); % TODO: hack for RIRE...
-% if ispet
-%     % Rescale intensities between 0 and 1
-%     im  = rescale(im);
-%     scl = 1;
-% end
+% % Rescale intensities between 0 and 1
+% im  = rescale(im);
+% scl = 1;
 
-% Compute feature
-z  = single(im);
+% To single
+z = single(im);
+
+% Voxel size
 vx = sqrt(sum(mat(1:3,1:3).^2));
-if strcmp(typ,'SqrdGradMag')
-    % Compute squared gradient magnitudes
-    z = scl*Grad(z,vx);
-    z = sum(z.^2,4);
-    
-    % Smooth a little bit
-    z = Smooth(z,vx,0);
-end
+
+% Compute squared gradient magnitudes (with scaling and voxel size)
+z = scl*Grad(z,vx);
+z = sum(z.^2,4);
+
+% % Smooth a little bit
+% z = Smooth(z,vx,0);
 %==========================================================================
 
 %==========================================================================
@@ -446,14 +452,10 @@ if dm(3) == 1, y(:,:,:,3) = 1; end
 function g = Grad(im,vx,y)
 d = [size(im) 1 1];
 if nargin < 4, y = Identity(d(1:3)); end
-g                = zeros([d(1:3) 3],'single');
-% % 'sobel', 'prewitt', 'central', 'intermediate' 
-% [g(:,:,:,1),g(:,:,:,2),g(:,:,:,3)] = imgradientxyz(im,'central');
-% g(:,:,:,1)                         = g(:,:,:,1)/vx(1);
-% g(:,:,:,2)                         = g(:,:,:,2)/vx(2);
-% g(:,:,:,3)                         = g(:,:,:,3)/vx(3);
+
+g                  = zeros([d(1:3) 3],'single');
 deg                = 2;
-bc                 = 1;
+bc                 = 0;
 [~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [deg 0 0 bc*ones(1,3)]);
 [~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 deg 0 bc*ones(1,3)]);
 [~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 deg bc*ones(1,3)]);
