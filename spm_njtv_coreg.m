@@ -149,10 +149,12 @@ for iter=1:numel(samp) % loop over sampling factors
         ShowAlignment(njtv,cost,false);
     end
     
-    % Start Powell (modified version, with mean correction of parameters)
+    % Start Powell
     if ixf == 0
-        q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align);
+        % Groupwise with template
+        q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align); % modified version, with mean correction of q parameters
     else        
+        % Groupwise with fixed image
         q = spm_powell(q(:),iq,sc,mfilename,dat,show_align);
     end
     
