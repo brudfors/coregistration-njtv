@@ -156,7 +156,8 @@ for iter=1:numel(samp) % loop over sampling factors
     % -----------------------------------------------------------------
     sc             = [];
     for c=1:Nm, sc = [sc sc0]; end
-    iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
+    iq             = diag(sc*20);
+    %iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
 
     if show_align
         % Alignment before registration
