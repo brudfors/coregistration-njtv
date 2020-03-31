@@ -24,20 +24,23 @@ if nargin > 2
     return;
 end
 
+% ---------------------------------------------------------------------
 % Check if required toolboxes are on the MATLAB path
-%-----------------------
+% ---------------------------------------------------------------------
 
 % SPM12
 % Download from https://www.fil.ion.ucl.ac.uk/spm/software/download
+% ---------------------------------------------------------------------
 if isempty(fileparts(which('spm'))), error('SPM12 not on the MATLAB path (get at fil.ion.ucl.ac.uk/spm/software/download)'); end
 
 % SPM auxiliary-functions
 % git clone https://github.com/WTCN-computational-anatomy-group/auxiliary-functions
+% ---------------------------------------------------------------------
 if isempty(fileparts(which('spm_gmm'))), error('SPM auxiliary-functions not on the MATLAB path (get at github.com/WTCN-computational-anatomy-group/auxiliary-functions)'); end
 
+% ---------------------------------------------------------------------
 % Parse options
-%-----------------------
-
+% ---------------------------------------------------------------------
 if nargin == 1, opt = struct;
 else,           opt = varargin{2}; end
 % Convergence criteria [tx,ty,tz,rx,ry,rz]
@@ -64,18 +67,21 @@ if isempty(ixf), ixf = 0; end
 mod_head   = opt.ModifyHeader;
 
 % If SPM has been compiled with OpenMP, this will speed things up
+% ---------------------------------------------------------------------
 setenv('SPM_NUM_THREADS',sprintf('%d',-1));
 
 % Repeatable random numbers
+% ---------------------------------------------------------------------
 rng('default'); rng(1);  
 
+% ---------------------------------------------------------------------
 % Read image data
-%-----------------------
-
+% ---------------------------------------------------------------------
 Nii = varargin{1};
 if ~isa(Nii,'nifti'), Nii = nifti(Nii); end
 
 % Parameters
+% ---------------------------------------------------------------------
 is2d = numel(Nii(1).dat.dim) == 2;
 C    = numel(Nii); % Number of channels
 chn  = 1:C;
@@ -90,32 +96,38 @@ end
 sc0  = tol(:)'; % Required accuracy
 
 % Powell options (for mod_spm_powell function)
+% ---------------------------------------------------------------------
 opt_pow = struct('mc',struct('do',false,'C',C,'nq',nq,'speak',false));
 if ixf == 0, opt_pow.mc.do = true; end
 
 % Init registration parameters
+% ---------------------------------------------------------------------
 q = zeros(1,Nm*nq);
 
+% ---------------------------------------------------------------------
 % Get image scaling from RMM/GMM fit
-%-----------------------
-
+% ---------------------------------------------------------------------
 scl = GetScaling(Nii,show_fit);
 
+% ---------------------------------------------------------------------
 % Start coarse-to-fine
-%-----------------------
-
+% ---------------------------------------------------------------------
 for iter=1:numel(samp) % loop over sampling factors
     
     % Sampling level
+    % -----------------------------------------------------------------
     samp_i = samp(iter);
         
+    % -----------------------------------------------------------------        
     % Init dat
+    % -----------------------------------------------------------------
     cl  = cell([1 Nm]);
     dat = struct('fix',struct('z',[],'y',[],'mat',[]), ...
                  'mov',struct('z',cl,'mat',cl), ...
                  'C',C, 'nq',nq);
 
     % Add fixed
+    % -----------------------------------------------------------------
     if ixf == 0
         % Use template
         [dmt,matt]  = GetTemplateSpace(Nii,vxt,samp_i);    
@@ -131,6 +143,7 @@ for iter=1:numel(samp) % loop over sampling factors
     dat.fix.y = IdentityJittered(dat.fix);    
     
     % Add moving
+    % -----------------------------------------------------------------
     for c=1:Nm
         [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i);
         dat.mov(c).z   = z;
@@ -138,7 +151,9 @@ for iter=1:numel(samp) % loop over sampling factors
     end
     clear z
     
+    % -----------------------------------------------------------------
     % Initial search values and stopping criterias      
+    % -----------------------------------------------------------------
     sc             = [];
     for c=1:Nm, sc = [sc sc0]; end
     iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
@@ -149,7 +164,9 @@ for iter=1:numel(samp) % loop over sampling factors
         ShowAlignment(njtv,cost,false);
     end
     
+    % -----------------------------------------------------------------
     % Start Powell
+    % -----------------------------------------------------------------
     if ixf == 0
         % Groupwise with template
         q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align); % modified version, with mean correction of q parameters
@@ -165,12 +182,15 @@ for iter=1:numel(samp) % loop over sampling factors
     end
 end
 
+% ---------------------------------------------------------------------
 % Transformations
+% ---------------------------------------------------------------------
 R                                     = repmat(eye(4),[1 1 C]);
 for c=1:numel(dat.mov), R(:,:,ixm(c)) = inv(GetRigid(q,c,dat)); end
 
 if mod_head
     % Modify headers
+    % -----------------------------------------------------------------
     for c=1:C
         fname = Nii(c).dat.fname;
         M     = Nii(c).mat; 
