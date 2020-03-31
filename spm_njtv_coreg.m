@@ -48,8 +48,8 @@ if ~isfield(opt,'IxFixed'),         opt.IxFixed = 1; end
 if ~isfield(opt,'ShowFit4Scaling'), opt.ShowFit4Scaling = false; end
 % Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [1]
 if ~isfield(opt,'ShowAlign'),       opt.ShowAlign = 1; end
-% Coarse-to-fine sampling scheme in decreasing order [8 4 2 1]
-if ~isfield(opt,'Samp'),            opt.Samp = [8 4 2 1];  end
+% Coarse-to-fine sampling scheme in decreasing order [8 1]
+if ~isfield(opt,'Samp'),            opt.Samp = [8 1];  end
 % Voxel size of template (if opt.IxFixed = 0)
 if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 % Modify header orientation matrices of moving images
