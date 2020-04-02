@@ -352,8 +352,8 @@ Mfix  = dat.fix.mat;
 yfix  = dat.fix.y;
 
 % Compute for fixed
-njtv  = -sqrt(dat.fix.z)/C;
-mtv   = dat.fix.z;
+njtv = -sqrt(dat.fix.z);
+mtv  = dat.fix.z;
 
 % Compute for moving
 for c=1:numel(dat.mov) % loop over moving images
@@ -375,11 +375,11 @@ for c=1:numel(dat.mov) % loop over moving images
     
     % Add to voxel-wise cost
     mtv  = mtv + z;
-    njtv = njtv - sqrt(z)/C;        
+    njtv = njtv - sqrt(z);        
 end    
 
 % Get final cost
-njtv = njtv + sqrt(mtv/C);
+njtv = njtv + sqrt(C)*sqrt(mtv); % modulate with sqrt(C)
 cost = sum(sum(sum(njtv,'double'),'double'),'double');
 
 if show_align > 1, ShowAlignment(njtv,cost); end
