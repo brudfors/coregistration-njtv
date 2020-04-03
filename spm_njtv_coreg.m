@@ -57,6 +57,8 @@ if ~isfield(opt,'Samp'),            opt.Samp = [8 4 2 1];  end
 if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 % Modify header orientation matrices of moving images
 if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
+% Degree and boundary condition used in interpolation [2 0]
+if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 0]; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
@@ -65,6 +67,7 @@ samp       = opt.Samp;
 vxt        = opt.VoxTemplate;
 if isempty(ixf), ixf = 0; end
 mod_head   = opt.ModifyHeader;
+deg_bc     = opt.DegBoundCond;
 
 % If SPM has been compiled with OpenMP, this will speed things up
 % ---------------------------------------------------------------------
@@ -124,7 +127,7 @@ for iter=1:numel(samp) % loop over sampling factors
     cl  = cell([1 Nm]);
     dat = struct('fix',struct('z',[],'y',[],'mat',[]), ...
                  'mov',struct('z',cl,'mat',cl), ...
-                 'C',C, 'nq',nq);
+                 'C',C, 'nq',nq, 'deg_bc',deg_bc);
 
     % Add fixed
     % -----------------------------------------------------------------
@@ -135,7 +138,7 @@ for iter=1:numel(samp) % loop over sampling factors
         dat.fix.mat = matt;
     else
         % Use one of the input images
-        [z,mat]     = SqrdGradMag(Nii(ixf),scl(ixf),samp_i);
+        [z,mat]     = SqrdGradMag(Nii(ixf),scl(ixf),samp_i,deg_bc);
         dat.fix.z   = z;
         dat.fix.mat = mat;
         clear z
@@ -145,7 +148,7 @@ for iter=1:numel(samp) % loop over sampling factors
     % Add moving
     % -----------------------------------------------------------------
     for c=1:Nm
-        [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i);
+        [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i,deg_bc);
         dat.mov(c).z   = z;
         dat.mov(c).mat = mat;
     end
@@ -157,7 +160,6 @@ for iter=1:numel(samp) % loop over sampling factors
     sc             = [];
     for c=1:Nm, sc = [sc sc0]; end
     iq             = diag(sc*20);
-    %iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
 
     if show_align
         % Alignment before registration
@@ -347,9 +349,10 @@ M_avg = M_avg * [eye(3) mn - (o + 1); 0 0 0 1];
 
 %==========================================================================
 function [cost,njtv] = CostFun(q,dat,show_align)
-C     = dat.C;
-Mfix  = dat.fix.mat;
-yfix  = dat.fix.y;
+C      = dat.C;
+Mfix   = dat.fix.mat;
+yfix   = dat.fix.y;
+deg_bc = dat.deg_bc;
 
 % Compute for fixed
 njtv = -sqrt(dat.fix.z);
@@ -367,8 +370,8 @@ for c=1:numel(dat.mov) % loop over moving images
     y    = Affine(yfix,M);
     
     % Move squared gradient magnitude (z)
-    deg = 2;
-    bc  = 0;
+    deg = deg_bc(1);
+    bc  = deg_bc(2);
     z   = spm_diffeo('bsplins', dat.mov(c).z, y, ...
                      [deg*ones(1,3) bc*zeros(1,3)]);
     z(~isfinite(z)) = 0;
@@ -386,7 +389,7 @@ if show_align > 1, ShowAlignment(njtv,cost); end
 %==========================================================================
 
 %==========================================================================
-function [z,mat] = SqrdGradMag(Nii,scl,samp)
+function [z,mat] = SqrdGradMag(Nii,scl,samp,deg_bc)
 
 % Get image data, and possibly down-sample
 [im,mat] = GetImg(Nii,samp);
@@ -402,7 +405,7 @@ z = single(im);
 vx = sqrt(sum(mat(1:3,1:3).^2));
 
 % Compute squared gradient magnitudes (with scaling and voxel size)
-z = scl*Grad(z,vx);
+z = scl*Grad(z,vx,deg_bc);
 z = sum(z.^2,4);
 
 % % Smooth a little bit
@@ -472,13 +475,14 @@ if dm(3) == 1, y(:,:,:,3) = 1; end
 %==========================================================================
 
 %==========================================================================
-function g = Grad(im,vx,y)
+function g = Grad(im,vx,deg_bc,y)
+if nargin < 3, deg_bc = [2 0]; end
 d = [size(im) 1 1];
 if nargin < 4, y = Identity(d(1:3)); end
 
 g                  = zeros([d(1:3) 3],'single');
-deg                = 2;
-bc                 = 0;
+deg                = deg_bc(1);
+bc                 = deg_bc(2);
 [~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [deg 0 0 bc*ones(1,3)]);
 [~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 deg 0 bc*ones(1,3)]);
 [~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 deg bc*ones(1,3)]);
