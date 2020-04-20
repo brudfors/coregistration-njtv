@@ -59,6 +59,8 @@ if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
 % Degree and boundary condition used in interpolation [2 1]
 if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 1]; end
+% Precompute squared gradient magnitudes (quicker) [true]
+if ~isfield(opt,'PreComp'),         opt.PreComp = true; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
@@ -68,6 +70,7 @@ vxt        = opt.VoxTemplate;
 if isempty(ixf), ixf = 0; end
 mod_head   = opt.ModifyHeader;
 deg_bc     = opt.DegBoundCond;
+pre_comp   = opt.PreComp;
 
 % If SPM has been compiled with OpenMP, this will speed things up
 % ---------------------------------------------------------------------
@@ -112,6 +115,11 @@ q = zeros(1,Nm*nq);
 % ---------------------------------------------------------------------
 scl = GetScaling(Nii,show_fit);
 
+% [dm,mat]    = GetTemplateSpace(Nii,vxt,samp_i);  
+% dm   = [size(Nii(ixf).dat) 1];
+% dm   = dm(1:3);
+% samp = max(ceil(log2(max(dm)) - log2(8)),1):-1:1;
+
 % ---------------------------------------------------------------------
 % Start coarse-to-fine
 % ---------------------------------------------------------------------
@@ -126,33 +134,54 @@ for iter=1:numel(samp) % loop over sampling factors
     % -----------------------------------------------------------------
     cl  = cell([1 Nm]);
     dat = struct('fix',struct('z',[],'y',[],'mat',[]), ...
-                 'mov',struct('z',cl,'mat',cl), ...
+                 'mov',struct('f',cl,'z',cl,'mat',cl,'vx',cl,'scl',cl), ...
                  'C',C, 'nq',nq, 'deg_bc',deg_bc);
 
+    if pre_comp
+        % Interpolate image, then compute gradient magnitudes
+        dat.mov = rmfield(dat.mov,'f');       
+    end
+        
     % Add fixed
-    % -----------------------------------------------------------------
+    % -----------------------------------------------------------------                
+
     if ixf == 0
         % Use template
-        [dmt,matt]  = GetTemplateSpace(Nii,vxt,samp_i);    
-        dat.fix.z   = zeros(dmt(1:3),'single');
-        dat.fix.mat = matt;
+        [dm,mat]    = GetTemplateSpace(Nii,vxt,samp_i);    
+        dat.fix.mat = mat;
+        dat.fix.y   = IdentityJittered(dm);    
+        dat.fix.z   = zeros(dm(1:3),'single');        
     else
         % Use one of the input images
-        [z,mat]     = SqrdGradMag(Nii(ixf),scl(ixf),samp_i,deg_bc);
-        dat.fix.z   = z;
-        dat.fix.mat = mat;
-        clear z
-    end
-    dat.fix.y = IdentityJittered(dat.fix);    
+        [f,mat,vx,dm] = GetImg(Nii(ixf),samp_i);
+        dat.fix.mat   = mat;        
+        dat.fix.y     = IdentityJittered(dm);    
+        z             = SqrdGradMag(f, dat.fix.y, scl(ixf), vx, deg_bc);
+        dat.fix.z     = z;        
+        clear z f
+    end    
     
     % Add moving
     % -----------------------------------------------------------------
     for c=1:Nm
-        [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i,deg_bc);
-        dat.mov(c).z   = z;
+        [f,mat,vx,dm] = GetImg(Nii(ixm(c)),samp_i);
+        
+        if pre_comp           
+            % Interpolate precomputed gradient magnitudes
+            y            = Identity(dm);
+            z            = SqrdGradMag(f,y,scl(ixm(c)),vx,deg_bc);
+            dat.mov(c).z = z;
+            clear z y
+        else            
+            % Interpolate image, then compute gradient magnitudes
+            dat.mov(c).f = f;             
+        end
+        clear f
+        
         dat.mov(c).mat = mat;
-    end
-    clear z
+        dat.mov(c).vx  = vx;
+        dat.mov(c).scl = scl(ixm(c));
+    end    
     
     % -----------------------------------------------------------------
     % Initial search values and stopping criterias      
@@ -353,6 +382,9 @@ C      = dat.C;
 Mfix   = dat.fix.mat;
 yfix   = dat.fix.y;
 deg_bc = dat.deg_bc;
+deg    = deg_bc(1);
+bc     = deg_bc(2);
+is_f   = isfield(dat.mov,'f');
 
 % Compute for fixed
 njtv = -sqrt(dat.fix.z);
@@ -368,13 +400,16 @@ for c=1:numel(dat.mov) % loop over moving images
     Mmov = dat.mov(c).mat;
     M    = Mmov\R*Mfix;
     y    = Affine(yfix,M);
-    
-    % Move squared gradient magnitude (z)
-    deg = deg_bc(1);
-    bc  = deg_bc(2);
-    z   = spm_diffeo('bsplins', dat.mov(c).z, y, ...
-                     [deg*ones(1,3) bc*zeros(1,3)]);
-    z(~isfinite(z)) = 0;
+            
+    % Move gradient magnitudes
+    if is_f
+        % Interpolate image, then compute gradient magnitudes
+        z = SqrdGradMag(dat.mov(c).f, y, dat.mov(c).scl, dat.mov(c).vx, deg_bc);
+    else
+        % Interpolate precomputed gradient magnitudes
+        z               = spm_diffeo('bsplins', dat.mov(c).z, y, [deg*ones(1,3) bc*zeros(1,3)]);
+        z(~isfinite(z)) = 0;
+    end    
     
     % Add to voxel-wise cost
     mtv  = mtv + z;
@@ -389,23 +424,14 @@ if show_align > 1, ShowAlignment(njtv,cost); end
 %==========================================================================
 
 %==========================================================================
-function [z,mat] = SqrdGradMag(Nii,scl,samp,deg_bc)
-
-% Get image data, and possibly down-sample
-[im,mat] = GetImg(Nii,samp);
+function z = SqrdGradMag(z,y,scl,vx,deg_bc)
 
 % % Rescale intensities between 0 and 1
-% im  = rescale(im);
+% z   = rescale(z);
 % scl = 1;
 
-% To single
-z = single(im);
-
-% Voxel size
-vx = sqrt(sum(mat(1:3,1:3).^2));
-
 % Compute squared gradient magnitudes (with scaling and voxel size)
-z = scl*Grad(z,vx,deg_bc);
+z = scl*Grad(z,y,vx,deg_bc);
 z = sum(z.^2,4);
 
 % % Smooth a little bit
@@ -475,17 +501,14 @@ if dm(3) == 1, y(:,:,:,3) = 1; end
 %==========================================================================
 
 %==========================================================================
-function g = Grad(im,vx,deg_bc,y)
-if nargin < 3, deg_bc = [2 0]; end
-d = [size(im) 1 1];
-if nargin < 4, y = Identity(d(1:3)); end
-
-g                  = zeros([d(1:3) 3],'single');
+function g = Grad(f,y,vx,deg_bc)
+dm                 = [size(y) 1];
+g                  = zeros([dm(1:3) 3],'single');
 deg                = deg_bc(1);
 bc                 = deg_bc(2);
-[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [deg 0 0 bc*ones(1,3)]);
-[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 deg 0 bc*ones(1,3)]);
-[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 deg bc*ones(1,3)]);
+[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins', f, y, [deg 0 0 bc*ones(1,3)]);
+[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins', f, y, [0 deg 0 bc*ones(1,3)]);
+[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins', f, y, [0 0 deg bc*ones(1,3)]);
 g(:,:,:,1)         = g(:,:,:,1)/vx(1);
 g(:,:,:,2)         = g(:,:,:,2)/vx(2);
 g(:,:,:,3)         = g(:,:,:,3)/vx(3);
@@ -513,10 +536,10 @@ R = spm_dexpm(qc,B);
 %==========================================================================
 
 %==========================================================================
-function y = IdentityJittered(fix)
-dm = [size(fix.z) 1]; 
-y  = Identity(dm);
-y  = y + rand(size(y),'single');
+function y = IdentityJittered(dm)
+y = Identity(dm);
+rng('default'); rng(1);  
+y = y + rand(size(y),'single');
 %==========================================================================
 
 %==========================================================================
@@ -601,7 +624,7 @@ end
 %==========================================================================
 
 %==========================================================================
-function [img,mat,dm] = GetImg(Nii,samp,deg,bc)
+function [img,mat,vx,dm] = GetImg(Nii,samp,deg,bc)
 if nargin < 2, samp = 1; end
 if nargin < 3, deg  = 0; end
 if nargin < 4, bc   = 0; end
@@ -648,6 +671,15 @@ else
     img                 = spm_bsplins(spm_bsplinc(img,par),x1,y1,z1,par);    
     img(~isfinite(img)) = 0;
 end
+
+% To single
+img = single(img);
+
+% Voxel size
+vx = sqrt(sum(mat(1:3,1:3).^2));
+
+% Image dimensions
+dm = [size(img) 1]; 
 %==========================================================================
 
 %==========================================================================
