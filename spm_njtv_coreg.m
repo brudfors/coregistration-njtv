@@ -57,8 +57,8 @@ if ~isfield(opt,'Samp'),            opt.Samp = [8 4 2 1];  end
 if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 % Modify header orientation matrices of moving images
 if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
-% Degree and boundary condition used in interpolation [2 0]
-if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 0]; end
+% Degree and boundary condition used in interpolation [2 1]
+if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 1]; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
