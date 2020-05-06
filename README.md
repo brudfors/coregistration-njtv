@@ -15,12 +15,12 @@ pth_ct  = 'ct.nii';  % CT image
 pth_in  = char(pth_t1w, pth_t2w, pth_ct); % Input to NJTV
 
 % NJTV options
-opt = struct('IxFixed', 1, ...         % T1w MRI is fixed
-             'ShowAlign', 1, ...       % Enable some verbose
-             'ShowFit4Scaling', true); % Enable some more verbose
+opt = struct('IxFixed', 1, ...          % T1w MRI is fixed
+             'ShowAlign', 1, ...        % Enable some verbose
+             'ShowFit4Scaling', true);  % Enable some more verbose
 
 % Run NJTV registration
-[~, R] = spm_njtv_coreg(pth_in, opt);
+[~, R] = spm_njtv_coreg(pth_in, opt);  % More detailed instructions in this function
 ```
 
 ## Dependencies
