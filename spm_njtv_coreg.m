@@ -49,14 +49,18 @@ if ~isfield(opt,'Tolerance'),       opt.Tolerance = [0.02 0.02 0.02 0.001 0.001 
 if ~isfield(opt,'IxFixed'),         opt.IxFixed = 1; end
 % Show GMM/RMM fit to intensity histogram [false]
 if ~isfield(opt,'ShowFit4Scaling'), opt.ShowFit4Scaling = false; end
-% Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [1]
-if ~isfield(opt,'ShowAlign'),       opt.ShowAlign = 1; end
+% Show alignment: 0. nothing,1. each coarse-to-fine step, 2. live [0]
+if ~isfield(opt,'ShowAlign'),       opt.ShowAlign = 0; end
 % Coarse-to-fine sampling scheme in decreasing order [8 4 2 1]
 if ~isfield(opt,'Samp'),            opt.Samp = [8 4 2 1];  end
 % Voxel size of template (if opt.IxFixed = 0)
 if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 % Modify header orientation matrices of moving images
 if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
+% Degree and boundary condition used in interpolation [2 0]
+if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 0]; end
+% Precompute squared gradient magnitudes (quicker) [true]
+if ~isfield(opt,'PreComp'),         opt.PreComp = true; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
@@ -65,6 +69,10 @@ samp       = opt.Samp;
 vxt        = opt.VoxTemplate;
 if isempty(ixf), ixf = 0; end
 mod_head   = opt.ModifyHeader;
+deg_bc     = opt.DegBoundCond;
+pre_comp   = opt.PreComp;
+
+spm_diffeo('bound',0);  % set spm_diffeo boundary conditions (only used if opt.DegBoundCond(2) = 1)
 
 % If SPM has been compiled with OpenMP, this will speed things up
 % ---------------------------------------------------------------------
@@ -110,9 +118,23 @@ q = zeros(1,Nm*nq);
 scl = GetScaling(Nii,show_fit);
 
 % ---------------------------------------------------------------------
+% Get limits of the common space FOV
+% ---------------------------------------------------------------------
+if ixf == 0, lim_fov = GetLimFOV(Nii);
+else,        lim_fov = GetLimFOV(Nii(ixf));
+end
+
+% [dm,mat]    = GetTemplateSpace(Nii,vxt,samp_i);  
+% dm   = [size(Nii(ixf).dat) 1];
+% dm   = dm(1:3);
+% samp = max(ceil(log2(max(dm)) - log2(8)),1):-1:1;
+
+% ---------------------------------------------------------------------
 % Start coarse-to-fine
 % ---------------------------------------------------------------------
-for iter=1:numel(samp) % loop over sampling factors
+niter = numel(samp);
+sc0 = max((niter - 1), 1)*sc0; % for coarse-to-fine on Powell stopping tolerance
+for iter=1:niter % loop over sampling factors
     
     % Sampling level
     % -----------------------------------------------------------------
@@ -123,41 +145,61 @@ for iter=1:numel(samp) % loop over sampling factors
     % -----------------------------------------------------------------
     cl  = cell([1 Nm]);
     dat = struct('fix',struct('z',[],'y',[],'mat',[]), ...
-                 'mov',struct('z',cl,'mat',cl), ...
-                 'C',C, 'nq',nq);
+                 'mov',struct('f',cl,'z',cl,'mat',cl,'vx',cl,'scl',cl), ...
+                 'C',C, 'nq',nq, 'deg_bc',deg_bc, 'lim_fov', lim_fov, 'ixm', ixm);
 
+    if pre_comp
+        % Interpolate image, then compute gradient magnitudes
+        dat.mov = rmfield(dat.mov,'f');       
+    end
+        
     % Add fixed
-    % -----------------------------------------------------------------
+    % -----------------------------------------------------------------                
+
     if ixf == 0
         % Use template
-        [dmt,matt]  = GetTemplateSpace(Nii,vxt,samp_i);    
-        dat.fix.z   = zeros(dmt(1:3),'single');
-        dat.fix.mat = matt;
+        [dm,mat]    = GetTemplateSpace(Nii,vxt,samp_i);    
+        dat.fix.mat = mat;
+        dat.fix.y   = IdentityJittered(dm);    
+        dat.fix.z   = zeros(dm(1:3),'single');        
     else
         % Use one of the input images
-        [z,mat]     = SqrdGradMag(Nii(ixf),scl(ixf),samp_i);
-        dat.fix.z   = z;
-        dat.fix.mat = mat;
-        clear z
-    end
-    dat.fix.y = IdentityJittered(dat.fix);    
+        [f,mat,vx,dm] = GetImg(Nii(ixf),samp_i);
+        dat.fix.mat   = mat;        
+        dat.fix.y     = IdentityJittered(dm);    
+        z             = SqrdGradMag(f, dat.fix.y, scl(ixf), vx, deg_bc);
+        dat.fix.z     = z;        
+        clear z f
+    end    
     
     % Add moving
     % -----------------------------------------------------------------
     for c=1:Nm
-        [z,mat]        = SqrdGradMag(Nii(ixm(c)),scl(ixm(c)),samp_i);
-        dat.mov(c).z   = z;
+        [f,mat,vx,dm] = GetImg(Nii(ixm(c)),samp_i);
+        
+        if pre_comp           
+            % Interpolate precomputed gradient magnitudes
+            y            = Identity(dm);
+            z            = SqrdGradMag(f,y,scl(ixm(c)),vx,deg_bc);
+            dat.mov(c).z = z;
+            clear z y
+        else            
+            % Interpolate image, then compute gradient magnitudes
+            dat.mov(c).f = f;             
+        end
+        clear f
+        
         dat.mov(c).mat = mat;
-    end
-    clear z
+        dat.mov(c).vx  = vx;
+        dat.mov(c).scl = scl(ixm(c));
+    end    
     
     % -----------------------------------------------------------------
     % Initial search values and stopping criterias      
     % -----------------------------------------------------------------
     sc             = [];
-    for c=1:Nm, sc = [sc sc0]; end
+    for c=1:Nm, sc = [sc sc0/iter]; end
     iq             = diag(sc*20);
-    %iq             = diag(sc*20/iter); % decrease stopping criteria w. iteration...     
 
     if show_align
         % Alignment before registration
@@ -170,7 +212,8 @@ for iter=1:numel(samp) % loop over sampling factors
     % -----------------------------------------------------------------
     if ixf == 0
         % Groupwise with template
-        q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align); % modified version, with mean correction of q parameters
+        % Uses modified Powell, with mean correction on q parameters
+        q = mod_spm_powell(q(:),iq,sc,opt_pow,mfilename,dat,show_align);
     else        
         % Groupwise with fixed image
         q = spm_powell(q(:),iq,sc,mfilename,dat,show_align);
@@ -201,8 +244,80 @@ end
 %==========================================================================
 
 %==========================================================================
-function [dm,mat] = GetTemplateSpace(Nii,vxt,samp)
-vxt  = vxt(1)*ones([1 3]);
+function [cost,njtv] = CostFun(q,dat,show_align)
+C      = dat.C;
+Mfix   = dat.fix.mat;
+yfix   = dat.fix.y;
+deg_bc = dat.deg_bc;
+deg    = deg_bc(1);
+bc     = deg_bc(2);
+is_f   = isfield(dat.mov,'f');
+
+% Get rigid transformation matrices from lie parameterisation
+R = GetRigids(q, dat);
+
+% Check so that parameters have not diverged (I know..ad-hoc..)
+if ~q_Okay(R, dat.lim_fov)
+    njtv = 0;
+    cost = 1e16;  % A large cost
+    return
+end
+
+% Compute for fixed
+njtv = -sqrt(dat.fix.z);
+mtv  = dat.fix.z;
+
+% Compute for moving
+for c=1:numel(dat.mov) % loop over moving images
+    
+    % Make alignment vector field (y)
+    Mmov = dat.mov(c).mat;
+    M    = Mmov\R(:,:,dat.ixm(c))*Mfix;
+    y    = Affine(yfix,M);
+            
+    % Move gradient magnitudes
+    if is_f
+        % Interpolate image, then compute gradient magnitudes
+        z = SqrdGradMag(dat.mov(c).f, y, dat.mov(c).scl, dat.mov(c).vx, deg_bc);
+    else
+        % Interpolate precomputed gradient magnitudes
+        z               = spm_diffeo('bsplins', dat.mov(c).z, y, [deg*ones(1,3) bc*zeros(1,3)]);
+        z(~isfinite(z)) = 0;
+    end    
+    
+    % Add to voxel-wise cost
+    mtv  = mtv + z;
+    njtv = njtv - sqrt(z);        
+end    
+
+% Get final cost
+njtv = njtv + sqrt(C)*sqrt(mtv); % modulate with sqrt(C)
+cost = sum(sum(sum(njtv,'double'),'double'),'double');
+
+if show_align > 1, ShowAlignment(njtv,cost); end
+%==========================================================================
+
+%==========================================================================
+function z = SqrdGradMag(z,y,scl,vx,deg_bc)
+
+% % Rescale intensities between 0 and 1
+% z   = rescale(z);
+% scl = 1;
+
+% Compute squared gradient magnitudes (with scaling and voxel size)
+z = scl*Grad(z,y,vx,deg_bc);
+z = sum(z.^2,4);
+
+% % Smooth a little bit
+% z = Smooth(z,vx,0);
+%==========================================================================
+
+%==========================================================================
+function [dm,mat] = GetTemplateSpace(Nii,vx,samp)
+if nargin < 2, vx = 0; end
+if nargin < 3, samp = 0; end
+
+vx  = vx(1)*ones([1 3]);
 samp = samp(1)*ones([1 3]);
 
 % Get all dimensions and orientation matrices
@@ -218,17 +333,21 @@ end
 % Compute dimensions and orientation of common space
 [mat,dm] = ComputeAvgMat(Mat,Dm);
 
-% Change voxel size of common space
-vxmu = sqrt(sum(mat(1:3,1:3).^2));
-D    = diag([vxmu./vxt 1]);
-mat  = mat/D;
-dm   = floor(D(1:3,1:3)*dm')';
+if vx(1) > 0
+    % Change voxel size of common space
+    vxmu = sqrt(sum(mat(1:3,1:3).^2));
+    D    = diag([vxmu./vx 1]);
+    mat  = mat/D;
+    dm   = floor(D(1:3,1:3)*dm')';
+end
 
-% Down-sample common space
-samp = max([1 1 1],ceil(samp./vxt));
-D    = diag([1./samp 1]);        
-mat  = mat/D;
-dm   = floor(D(1:3,1:3)*dm(1:3)')';
+if samp(1) > 0
+    % Down-sample common space
+    samp = max([1 1 1],ceil(samp./vx));
+    D    = diag([1./samp 1]);        
+    mat  = mat/D;
+    dm   = floor(D(1:3,1:3)*dm(1:3)')';
+end
 %==========================================================================
 
 %==========================================================================
@@ -346,91 +465,48 @@ M_avg = M_avg * [eye(3) mn - (o + 1); 0 0 0 1];
 %==========================================================================
 
 %==========================================================================
-function [cost,njtv] = CostFun(q,dat,show_align)
-C     = dat.C;
-Mfix  = dat.fix.mat;
-yfix  = dat.fix.y;
-
-% Compute for fixed
-njtv = -sqrt(dat.fix.z);
-mtv  = dat.fix.z;
-
-% Compute for moving
-for c=1:numel(dat.mov) % loop over moving images
-    
-    % Get rigid transformation matrix from lie parameterisation
-    R = GetRigid(q,c,dat);
-    
-    % Make alignment vector field (y)
-    Mmov = dat.mov(c).mat;
-    M    = Mmov\R*Mfix;
-    y    = Affine(yfix,M);
-    
-    % Move squared gradient magnitude (z)
-    deg = 2;
-    bc  = 0;
-    z   = spm_diffeo('bsplins', dat.mov(c).z, y, ...
-                     [deg*ones(1,3) bc*zeros(1,3)]);
-    z(~isfinite(z)) = 0;
-    
-    % Add to voxel-wise cost
-    mtv  = mtv + z;
-    njtv = njtv - sqrt(z);        
-end    
-
-% Get final cost
-njtv = njtv + sqrt(C)*sqrt(mtv); % modulate with sqrt(C)
-cost = sum(sum(sum(njtv,'double'),'double'),'double');
-
-if show_align > 1, ShowAlignment(njtv,cost); end
+function R = GetRigids(q, dat)
+C   = dat.C;
+ixm = dat.ixm;
+R   = repmat(eye(4),[1 1 C]);
+for c=1:numel(dat.mov), R(:,:,ixm(c)) = GetRigid(q,c,dat); end
 %==========================================================================
 
 %==========================================================================
-function [z,mat] = SqrdGradMag(Nii,scl,samp)
-
-% Get image data, and possibly down-sample
-[im,mat] = GetImg(Nii,samp);
-
-% % Rescale intensities between 0 and 1
-% im  = rescale(im);
-% scl = 1;
-
-% To single
-z = single(im);
-
-% Voxel size
-vx = sqrt(sum(mat(1:3,1:3).^2));
-
-% Compute squared gradient magnitudes (with scaling and voxel size)
-z = scl*Grad(z,vx);
-z = sum(z.^2,4);
-
-% % Smooth a little bit
-% z = Smooth(z,vx,0);
-%==========================================================================
-
-%==========================================================================
-function img = Smooth(img,vx,fwhm)
-if nargin < 2, vx   = 1; end
-if nargin < 3, fwhm = 1; end
-
-if numel(fwhm) == 1, fwhm = fwhm*ones(1,3); end
-if numel(vx) == 1,   vx = vx*ones(1,3); end
-
-if fwhm > 0        
-    fwhm = fwhm./vx;            % voxel anisotropy
-    s1   = fwhm/sqrt(8*log(2)); % FWHM -> Gaussian parameter
-
-    x  = round(6*s1(1)); x = -x:x; x = spm_smoothkern(fwhm(1),x,1); x  = x/sum(x);
-    y  = round(6*s1(2)); y = -y:y; y = spm_smoothkern(fwhm(2),y,1); y  = y/sum(y);
-    z  = round(6*s1(3)); z = -z:z; z = spm_smoothkern(fwhm(3),z,1); z  = z/sum(z);
-
-    i  = (length(x) - 1)/2;
-    j  = (length(y) - 1)/2;
-    k  = (length(z) - 1)/2;
-
-    spm_conv_vol(img,img,x,y,z,-[i,j,k]);   
+function okay = q_Okay(R, lim_fov)
+C     = size(R, 3);
+t     = repmat(lim_fov, 1, C);
+msk_t = repmat([false(1,12) true(1,3) false], 1, C);
+if sum(abs(R(msk_t)) > t), okay = false;
+else,                      okay = true;
 end
+%==========================================================================
+
+%==========================================================================
+function lim_fov = GetLimFOV(Nii)
+
+% Get definition of common space
+[dim, mat] = GetTemplateSpace(Nii);
+
+% Get bounding box in world (mm) coordinates
+c = [ 1    1    1    1  % corners in voxel-space
+    1    1    dim(3) 1
+    1    dim(2) 1    1
+    1    dim(2) dim(3) 1
+    dim(1) 1    1    1
+    dim(1) 1    dim(3) 1
+    dim(1) dim(2) 1    1
+    dim(1) dim(2) dim(3) 1 ]';
+% corners in world-space
+tc = mat(1:3,1:4)*c;
+
+% bounding box (world) min and max
+mn = min(tc,[],2)';
+mx = max(tc,[],2)';
+bb = [mn; mx];
+
+% Limits on the FOV
+lim_fov = abs(0.5*diff(bb));
 %==========================================================================
 
 %==========================================================================
@@ -472,16 +548,14 @@ if dm(3) == 1, y(:,:,:,3) = 1; end
 %==========================================================================
 
 %==========================================================================
-function g = Grad(im,vx,y)
-d = [size(im) 1 1];
-if nargin < 4, y = Identity(d(1:3)); end
-
-g                  = zeros([d(1:3) 3],'single');
-deg                = 2;
-bc                 = 0;
-[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins',im,y, [deg 0 0 bc*ones(1,3)]);
-[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins',im,y, [0 deg 0 bc*ones(1,3)]);
-[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins',im,y, [0 0 deg bc*ones(1,3)]);
+function g = Grad(f,y,vx,deg_bc)
+dm                 = [size(y) 1];
+g                  = zeros([dm(1:3) 3],'single');
+deg                = deg_bc(1);
+bc                 = deg_bc(2);
+[~,g(:,:,:,1),~,~] = spm_diffeo('bsplins', f, y, [deg 0 0 bc*ones(1,3)]);
+[~,~,g(:,:,:,2),~] = spm_diffeo('bsplins', f, y, [0 deg 0 bc*ones(1,3)]);
+[~,~,~,g(:,:,:,3)] = spm_diffeo('bsplins', f, y, [0 0 deg bc*ones(1,3)]);
 g(:,:,:,1)         = g(:,:,:,1)/vx(1);
 g(:,:,:,2)         = g(:,:,:,2)/vx(2);
 g(:,:,:,3)         = g(:,:,:,3)/vx(3);
@@ -509,10 +583,10 @@ R = spm_dexpm(qc,B);
 %==========================================================================
 
 %==========================================================================
-function y = IdentityJittered(fix)
-dm = [size(fix.z) 1]; 
-y  = Identity(dm);
-y  = y + rand(size(y),'single');
+function y = IdentityJittered(dm)
+y = Identity(dm);
+rng('default'); rng(1);  
+y = y + rand(size(y),'single');
 %==========================================================================
 
 %==========================================================================
@@ -597,7 +671,7 @@ end
 %==========================================================================
 
 %==========================================================================
-function [img,mat,dm] = GetImg(Nii,samp,deg,bc)
+function [img,mat,vx,dm] = GetImg(Nii,samp,deg,bc)
 if nargin < 2, samp = 1; end
 if nargin < 3, deg  = 0; end
 if nargin < 4, bc   = 0; end
@@ -644,6 +718,15 @@ else
     img                 = spm_bsplins(spm_bsplinc(img,par),x1,y1,z1,par);    
     img(~isfinite(img)) = 0;
 end
+
+% To single
+img = single(img);
+
+% Voxel size
+vx = sqrt(sum(mat(1:3,1:3).^2));
+
+% Image dimensions
+dm = [size(img) 1]; 
 %==========================================================================
 
 %==========================================================================
@@ -902,5 +985,29 @@ elseif g.dim==3
     otherwise
         error('Unknown group.');
     end
+end
+%==========================================================================
+
+%==========================================================================
+function img = Smooth(img,vx,fwhm)
+if nargin < 2, vx   = 1; end
+if nargin < 3, fwhm = 1; end
+
+if numel(fwhm) == 1, fwhm = fwhm*ones(1,3); end
+if numel(vx) == 1,   vx = vx*ones(1,3); end
+
+if fwhm > 0        
+    fwhm = fwhm./vx;            % voxel anisotropy
+    s1   = fwhm/sqrt(8*log(2)); % FWHM -> Gaussian parameter
+
+    x  = round(6*s1(1)); x = -x:x; x = spm_smoothkern(fwhm(1),x,1); x  = x/sum(x);
+    y  = round(6*s1(2)); y = -y:y; y = spm_smoothkern(fwhm(2),y,1); y  = y/sum(y);
+    z  = round(6*s1(3)); z = -z:z; z = spm_smoothkern(fwhm(3),z,1); z  = z/sum(z);
+
+    i  = (length(x) - 1)/2;
+    j  = (length(y) - 1)/2;
+    k  = (length(z) - 1)/2;
+
+    spm_conv_vol(img,img,x,y,z,-[i,j,k]);   
 end
 %==========================================================================
