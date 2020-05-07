@@ -1,6 +1,14 @@
 # NJTV: Groupwise Multimodal Image Registration using Joint Total  Variation
 
-MATLAB implementation of an algorithm for groupwise, between modality coregistration using a Normalised Joint Total Variation (NJTV) cost function. This algorithm aligns multiple images **rigidly**, by optimising the NJTV multi-channel cost function using Powell's method. 
+MATLAB implementation of an algorithm for groupwise, between modality coregistration using a Normalised Joint Total Variation (NJTV) cost function:
+
+```
+Brudfors M, Balbastre Y, Ashburner J. 
+Groupwise Multimodal Image Registration using Joint Total  Variation.
+arXiv preprint arXiv:2005.02933. 2020 May 7.
+```
+
+The algorithm aligns multiple images **rigidly**, by optimising the NJTV multi-channel cost function using Powell's method.
 
 To run, simply give a bunch of nifti files (as char array or SPM nifti object) as input to the `spm_coregistration_njtv` function. This function will then output the estimated rigid transformation matrices (or an option can be set to change the orientation matrices in the nifti headers).
 
