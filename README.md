@@ -13,9 +13,7 @@ The algorithm aligns multiple images **rigidly**, by optimising the NJTV multi-c
 To run, simply give a bunch of nifti files (as char array or SPM nifti object) as input to the `spm_coregistration_njtv` function. This function will then output the estimated rigid transformation matrices (or an option can be set to change the orientation matrices in the nifti headers).
 
 ## Basic use case
-
-
-```
+``` matlab
 % Paths to nifti images (*.nii)
 pth_t1w = 'mri.nii'; % T1w MR image
 pth_t2w = 'mri.nii'; % T2w MR image
