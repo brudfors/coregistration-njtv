@@ -59,14 +59,17 @@ if ~isfield(opt,'VoxTemplate'),     opt.VoxTemplate = 1.5; end
 if ~isfield(opt,'ModifyHeader'),    opt.ModifyHeader = false; end
 % Degree and boundary condition used in interpolation [2 0]
 if ~isfield(opt,'DegBoundCond'),    opt.DegBoundCond = [2 0]; end
-% Precompute squared gradient magnitudes (quicker) [true]
+% Precompute squared gradient magnitudes (much quicker) [true]
 if ~isfield(opt,'PreComp'),         opt.PreComp = true; end
+% Images to keep in alignment [{}]
+if ~isfield(opt,'KeepInAlignment'), opt.KeepInAlignment = {}; end
 tol        = opt.Tolerance;
 ixf        = opt.IxFixed;
 show_fit   = opt.ShowFit4Scaling;
 show_align = opt.ShowAlign;
 samp       = opt.Samp;
 vxt        = opt.VoxTemplate;
+keep       = opt.KeepInAlignment;
 if isempty(ixf), ixf = 0; end
 mod_head   = opt.ModifyHeader;
 deg_bc     = opt.DegBoundCond;
@@ -238,7 +241,13 @@ if mod_head
     for c=1:C
         fname = Nii(c).dat.fname;
         M     = Nii(c).mat; 
-        spm_get_space(fname,R(:,:,c)*M); 
+        spm_get_space(fname,R(:,:,c)*M);
+        if numel(keep) == C && ~isempty(keep{c})
+            fname_keep = keep{c};
+            Nii_keep = nifti(fname_keep);
+            M_keep = Nii_keep.mat;
+            spm_get_space(fname_keep,R(:,:,c)*M_keep);
+        end
     end
 end
 %==========================================================================
